@@ -78,17 +78,8 @@ jobs:
             dpkg-deb -c "$f" | grep -E 'dylib|plist'
           done
           file out/AutoClicker.dylib
-          echo "--- dylib 里的架构 ---"
-          lipo -info out/AutoClicker.dylib 2>/dev/null || \
-            python3 -c "
-import struct
-d=open('out/AutoClicker.dylib','rb').read()
-n=struct.unpack('>I',d[4:8])[0]
-print('fat slices:',n)
-for i in range(n):
-    cpu,sub,o,sz,al=struct.unpack('>iiIII',d[8+i*20:8+i*20+20])
-    print('  cpu=%d sub=%d size=%d'%(cpu,sub,sz))
-"
+          echo "--- dylib 前 8 字节（cafebabe = fat） ---"
+          od -An -tx1 -N8 out/AutoClicker.dylib
 
       - name: Resolve artifact name
         id: name
