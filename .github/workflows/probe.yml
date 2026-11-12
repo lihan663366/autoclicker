@@ -1,0 +1,14 @@
+name: Runner Probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: hello
+        run: echo "runner is alive"; uname -a
