@@ -2,31 +2,54 @@ name: Build AutoClicker
 
 on:
   push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     env:
       THEOS: ${{ github.workspace }}/theos
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential fakeroot rsync curl perl git libxml2 xz-utils file dpkg
+          # 非 Swift 工具链要 libtinfo，不同 Ubuntu 版本包名不一样
+          sudo apt-get install -y libtinfo5 || sudo apt-get install -y libtinfo6 || true
+
       - name: Install Theos
         run: |
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/toolchain"
+          curl -sL https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz \
+            | tar -xJ -C "$THEOS/toolchain/"
+          echo "--- toolchain ---"
+          ls "$THEOS/toolchain/"
+          "$THEOS/toolchain/linux/iphone/bin/clang" --version | head -3
+
+      - name: Install SDKs
+        run: |
+          mkdir -p "$THEOS/sdks"
           curl -sL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
           tar -xzf /tmp/sdks.tar.gz -C /tmp
-          mkdir -p "$THEOS/sdks"
-          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
-          ls "$THEOS/sdks"
-          echo "$THEOS/bin" >> $GITHUB_PATH
+          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/"
+          echo "--- sdks ---"
+          ls "$THEOS/sdks/"
 
       - name: Build package
         run: |
+          export PATH="$THEOS/bin:$PATH"
           make clean || true
           make package FINALPACKAGE=1 DEBUG=0
+
+      - name: Show artifacts
+        if: always()
+        run: ls -lh packages/ || true
 
       - name: Upload deb
         uses: actions/upload-artifact@v4
