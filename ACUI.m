@@ -76,7 +76,26 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     w.passesThroughTouches = YES;
     w.hidden = NO;
     [w layoutIfNeeded];
+
+    // hidden = NO 只是"不隐藏"，窗口对象还躺在场外，没人把它画出来。
+    // orderFrontRegardless 才是真正把它塞进同层级的显示队列最前面 ——
+    // 少了这一句的典型症状：scene 有、frame 对、hidden=NO，屏幕上什么都没有。
+    [w orderFrontRegardless];
+
     return w;
+}
+
+/// 自建窗口彻底没戏时的最后一条路：把内容直接挂到宿主已有的窗口上。
+/// SpringBoard 里这个就是主屏窗口，App 里就是 App 自己的窗口。
+static UIView *ACHostFallbackView(void) {
+    UIWindow *best = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w.isHidden || w.alpha < 0.01) continue;
+        if (w.bounds.size.width < 10) continue;
+        if (!best || w.windowLevel > best.windowLevel) best = w;
+    }
+    if (!best) return nil;
+    return best.rootViewController.view ?: best;
 }
 
 #pragma mark - 管理器
@@ -85,6 +104,8 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
 @property (nonatomic, strong) ACWindow *win;
 @property (nonatomic, strong) UIView   *icon;      // 悬浮球
+@property (nonatomic, strong) UIView   *hostViewOverride;   // 兜底挂载时的父视图
+@property (nonatomic, assign) BOOL      fellBack;
 
 @property (nonatomic, strong) UIView   *panel;
 @property (nonatomic, strong) UILabel  *statusLabel;
@@ -96,12 +117,19 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 @property (nonatomic, strong) UIButton *actionBtn;
 @property (nonatomic, strong) UIButton *channelBtn;
 @property (nonatomic, strong) UIView   *logView;
+@property (nonatomic, strong) UILabel  *diagLabel;   // 底部自检行：宿主 / 窗口 / 通道
 
 @property (nonatomic, strong) ACWindow *selWin;
 @property (nonatomic, strong) UIView   *selRect;
 @property (nonatomic, assign) CGPoint   selStart;
 
 @property (nonatomic, assign) BOOL didSetup;
+@property (nonatomic, strong) dispatch_source_t keeper;     // 窗口保活定时器
+
+- (UIView *)hostView;
+- (CGSize)screenSize;
+- (void)startWindowKeeper;
+- (NSString *)diagnosticLine;
 
 @end
 
@@ -120,12 +148,26 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     [self setupAttempt:0];
 }
 
+/// 悬浮球和面板真正挂在哪。
+/// 正常情况下是自建窗口的 rootViewController.view；自建窗口上不了屏时换成宿主的窗口。
+- (UIView *)hostView {
+    return self.hostViewOverride ?: self.win.rootViewController.view;
+}
+
+/// 布局基准尺寸。兜底模式下父视图是宿主的窗口，不能拿 self.win 的尺寸硬套。
+- (CGSize)screenSize {
+    CGSize s = self.hostView.bounds.size;
+    if (s.width < 10 || s.height < 10) s = [UIScreen mainScreen].bounds.size;
+    return s;
+}
+
 /// 宿主启动早期 connectedScenes 可能还是空的，拿不到 scene 就等一会儿再来。
-/// App 进程从 didBecomeActive 到 scene 就绪通常不到 1 秒，这里给足 20 秒余量。
+/// 但最多等 8 秒 —— 等不到就得换路走，不能让用户对着空屏幕猜。
 - (void)setupAttempt:(NSInteger)attempt {
     if (self.didSetup) return;
 
-    BOOL ready = (ACActiveScene() != nil);
+    UIWindowScene *scene = ACActiveScene();
+    BOOL ready = (scene != nil);
 
     // App 可能被推送/后台任务唤醒加载我们，那种时候不能建窗
     if (ready && !ACIsSpringBoard()) {
@@ -134,7 +176,7 @@ static ACWindow *ACMakeWindow(CGFloat level) {
         }
     }
 
-    if (!ready && attempt < 40) {
+    if (!ready && attempt < 16) {
         __weak typeof(self) weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -147,10 +189,26 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
     ACRefreshInjectChannel();
     self.win = ACMakeWindow(ACIconLevel());
-    ACDLog(@"window built: level=%.0f frame=%@ hidden=%d scene=%@",
+
+    ACDLog(@"window built: level=%.0f frame=%@ hidden=%d scene=%@ attempt=%ld",
            self.win.windowLevel, NSStringFromCGRect(self.win.frame),
            self.win.hidden,
-           self.win.windowScene ? @"yes" : @"nil");
+           self.win.windowScene ? @"yes" : @"nil",
+           (long)attempt);
+
+    // 没有 windowScene 的 UIWindow 在 iOS 13+ 永远不会被画出来 —— 对象在、frame 对、
+    // hidden=NO，屏幕上就是空的。这种情况不再干等，直接把内容挂到宿主现成的窗口上。
+    if (!self.win.windowScene) {
+        UIView *host = ACHostFallbackView();
+        if (host) {
+            self.hostViewOverride = host;
+            self.fellBack = YES;
+            self.win.hidden = YES;   // 万一它哪天又上屏了，别出现两个球
+            ACDLog(@"!! 没有 windowScene，已改挂宿主窗口 %@", NSStringFromClass([host class]));
+        } else {
+            ACDLog(@"!! 没有 windowScene，也没有可用的宿主窗口");
+        }
+    }
 
     [self buildIcon];
     [self buildPanel];
@@ -164,20 +222,47 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     // 注入到本进程时，悬浮窗自己也在事件路径上 —— 每次点击前让开一瞬。
     // 关键：恢复必须延迟到 up 事件也发完之后，否则 down 落到 App、up 落到浮窗，
     // App 收到的是一次没有抬起的按下，什么都不会触发。
+    // 要注意的是"让开"的对象不是窗口，而是悬浮球实际挂着的那层视图 ——
+    // 兜底模式下球挂在宿主窗口上，只关窗口的交互对它毫无作用，会自己点自己。
     [ACEngine shared].willTap = ^{
         __strong typeof(self) s = weakSelf;
-        s.win.userInteractionEnabled = NO;
+        s.hostView.userInteractionEnabled = NO;
     };
     [ACEngine shared].didTap = ^{
         __strong typeof(self) s = weakSelf;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)),
                        dispatch_get_main_queue(), ^{
-            s.win.userInteractionEnabled = YES;
+            s.hostView.userInteractionEnabled = YES;
         });
     };
 
+    [self startWindowKeeper];
     [self refreshUI];
-    ACDLog(@"setup done, channel=%@", ACInjectChannelName(ACInjectActiveChannel()));
+    ACDLog(@"setup done, channel=%@ fallback=%d",
+           ACInjectChannelName(ACInjectActiveChannel()), self.fellBack);
+}
+
+/// SpringBoard 在锁屏、解锁、切换 App 时会把非系统窗口压到后面去，
+/// 这里定期把窗口重新提到最前 —— 只是 orderFront，不抢 key window，不影响输入。
+- (void)startWindowKeeper {
+    if (self.keeper || self.fellBack) return;
+
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                 dispatch_get_main_queue());
+    dispatch_source_set_timer(t,
+                              dispatch_time(DISPATCH_TIME_NOW, 3ull * NSEC_PER_SEC),
+                              3ull * NSEC_PER_SEC,
+                              1ull * NSEC_PER_SEC);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(t, ^{
+        __strong typeof(self) s = weakSelf;
+        if (!s.win || s.fellBack) return;
+        if (s.win.hidden) s.win.hidden = NO;
+        [s.win orderFrontRegardless];
+    });
+    dispatch_resume(t);
+    self.keeper = t;
 }
 
 #pragma mark 悬浮球
@@ -227,12 +312,12 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     [tap requireGestureRecognizerToFail:pan];
     [v addGestureRecognizer:tap];
 
-    [self.win.rootViewController.view addSubview:v];
+    [self.hostView addSubview:v];
     self.icon = v;
 
     // 版本角标：装错包/装了旧包是最常见的"没效果"来源，一眼就能确认
     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(s - 26, -6, 32, 15)];
-    badge.text = @"1.2";
+    badge.text = @"1.3";
     badge.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.32 alpha:1.0];
     badge.font = [UIFont boldSystemFontOfSize:9.5];
     badge.textAlignment = NSTextAlignmentCenter;
@@ -254,15 +339,15 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     }
 
     UIView *v = self.icon;
-    CGPoint t = [g translationInView:self.win];
+    CGPoint t = [g translationInView:self.hostView];
     CGPoint c = CGPointMake(v.center.x + t.x, v.center.y + t.y);
 
-    CGSize screen = self.win.bounds.size;
+    CGSize screen = self.screenSize;
     CGFloat r = v.bounds.size.width / 2.0;
     c.x = MAX(r + 4, MIN(screen.width  - r - 4, c.x));
     c.y = MAX(r + 34, MIN(screen.height - r - 4, c.y));
     v.center = c;
-    [g setTranslation:CGPointZero inView:self.win];
+    [g setTranslation:CGPointZero inView:self.hostView];
 
     if (g.state == UIGestureRecognizerStateEnded ||
         g.state == UIGestureRecognizerStateCancelled) {
@@ -422,13 +507,22 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     [p addSubview:act];
     self.actionBtn = act;
 
+    // 自检行：装上没反应时，截这一张图就能定位卡在哪一层
+    self.diagLabel = [self makeLabel:@"·" size:9.5
+                               color:[UIColor colorWithWhite:0.45 alpha:1.0] bold:NO];
+    self.diagLabel.frame = CGRectMake(AC_SIDE, AC_PANEL_H - 18, innerW, 12);
+    self.diagLabel.textAlignment = NSTextAlignmentCenter;
+    self.diagLabel.adjustsFontSizeToFitWidth = YES;
+    self.diagLabel.minimumScaleFactor = 0.7;
+    [p addSubview:self.diagLabel];
+
     self.panel = p;
 }
 
 - (void)layoutPanel {
     if (!self.panel.superview) return;
 
-    CGSize screen = self.win.bounds.size;
+    CGSize screen = self.screenSize;
     CGFloat w = AC_PANEL_W;
     CGFloat h = AC_PANEL_H;
 
@@ -447,7 +541,7 @@ static ACWindow *ACMakeWindow(CGFloat level) {
         [self.panel removeFromSuperview];
         return;
     }
-    [self.win.rootViewController.view addSubview:self.panel];
+    [self.hostView addSubview:self.panel];
     [self layoutPanel];
     [self refreshUI];
 }
@@ -537,7 +631,7 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     }
     if (self.panel.superview) [self.panel removeFromSuperview];
 
-    CGRect screen = self.win.bounds;
+    CGRect screen = CGRectMake(0, 0, self.screenSize.width, self.screenSize.height);
     UIView *host = [[UIView alloc] initWithFrame:screen];
     host.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.86];
 
@@ -571,7 +665,7 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     // 文本要能滚动，别被手势吃掉
     tap.cancelsTouchesInView = NO;
 
-    [self.win.rootViewController.view addSubview:host];
+    [self.hostView addSubview:host];
     self.logView = host;
 }
 
@@ -581,6 +675,14 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 }
 
 #pragma mark 刷新
+
+- (NSString *)diagnosticLine {
+    NSString *host = ACIsSpringBoard() ? @"SB" : @"App";
+    NSString *win  = self.fellBack ? @"挂宿主窗" : (self.win.windowScene ? @"自建窗" : @"无窗");
+    return [NSString stringWithFormat:@"%@ %d · %@ · %@",
+            host, (int)getpid(), win,
+            ACInjectChannelName(ACInjectActiveChannel())];
+}
 
 - (void)refreshUI {
     ACEngine *e = [ACEngine shared];
@@ -629,6 +731,8 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     self.channelBtn.backgroundColor = (ch == ACInjectChannelNone)
         ? [UIColor colorWithRed:0.55 green:0.20 blue:0.18 alpha:1.0]
         : [UIColor colorWithWhite:1.0 alpha:0.14];
+
+    self.diagLabel.text = [self diagnosticLine];
 }
 
 #pragma mark 选点 / 框选

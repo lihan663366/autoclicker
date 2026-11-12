@@ -44,7 +44,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = AutoClicker
 AutoClicker_FILES = Tweak.xm ACCore.m ACUI.m ACDebug.m
 AutoClicker_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-deprecated-declarations
-AutoClicker_FRAMEWORKS = UIKit Foundation CoreGraphics
+AutoClicker_FRAMEWORKS = UIKit Foundation CoreGraphics AudioToolbox
 AutoClicker_LDFLAGS = -undefined dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/tweak.mk

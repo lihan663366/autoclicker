@@ -61,11 +61,12 @@ BOOL ACIsSpringBoard(void) {
     static BOOL sb = NO;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        // 这里会被 ctor 直接调用，绝对不能写日志 —— 碰文件系统会拖慢甚至搞崩
+        // SpringBoard 启动，被 Dopamine 拉黑之后就再也注入不进来了。
         NSString *n = [NSProcessInfo processInfo].processName;
-        sb = [n isEqualToString:@"SpringBoard"];
-        ACDLog(@"host=%@ isSpringBoard=%d bundle=%@ pid=%d",
-               n, sb, [NSBundle mainBundle].bundleIdentifier ?: @"?",
-               (int)getpid());
+        NSString *b = [NSBundle mainBundle].bundleIdentifier;
+        sb = [n isEqualToString:@"SpringBoard"] ||
+             [b isEqualToString:@"com.apple.springboard"];
     });
     return sb;
 }
