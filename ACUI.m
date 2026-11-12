@@ -6,6 +6,7 @@
 #import "ACCore.h"
 #import "ACDebug.h"
 #import <math.h>
+#import <objc/message.h>
 
 #define AC_ICON_SIZE 56.0
 #define AC_PANEL_W   280.0
@@ -63,6 +64,28 @@ static UIWindowScene *ACActiveScene(void) {
     return nil;
 }
 
+/// 把窗口真正送上屏幕。
+///
+/// hidden = NO 只是"不隐藏"，窗口对象还躺在场外，没人把它画出来。
+/// iOS 上没有 orderFrontRegardless（那是 macOS 的），公开 API 里最接近的是
+/// makeKeyAndVisible —— 但它会把 key window 抢走，SpringBoard 里这么干会打断
+/// 正在进行的文本输入。所以优先用私有的 _orderFrontWithoutMakingKey：只上屏不抢焦点。
+static void ACShowWindow(UIWindow *w) {
+    if (!w) return;
+    w.hidden = NO;
+
+    SEL sel = NSSelectorFromString(@"_orderFrontWithoutMakingKey");
+    if ([w respondsToSelector:sel]) {
+        ((void (*)(id, SEL))objc_msgSend)(w, sel);
+        return;
+    }
+
+    // 老系统退路：抢一次 key 再立刻还回去
+    UIWindow *prev = [UIApplication sharedApplication].keyWindow;
+    [w makeKeyAndVisible];
+    if (prev && prev != w) [prev makeKeyWindow];
+}
+
 static ACWindow *ACMakeWindow(CGFloat level) {
     UIWindowScene *sc = ACActiveScene();
     ACWindow *w = sc ? [[ACWindow alloc] initWithWindowScene:sc]
@@ -77,10 +100,8 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     w.hidden = NO;
     [w layoutIfNeeded];
 
-    // hidden = NO 只是"不隐藏"，窗口对象还躺在场外，没人把它画出来。
-    // orderFrontRegardless 才是真正把它塞进同层级的显示队列最前面 ——
     // 少了这一句的典型症状：scene 有、frame 对、hidden=NO，屏幕上什么都没有。
-    [w orderFrontRegardless];
+    ACShowWindow(w);
 
     return w;
 }
@@ -258,8 +279,7 @@ static UIView *ACHostFallbackView(void) {
     dispatch_source_set_event_handler(t, ^{
         __strong typeof(self) s = weakSelf;
         if (!s.win || s.fellBack) return;
-        if (s.win.hidden) s.win.hidden = NO;
-        [s.win orderFrontRegardless];
+        ACShowWindow(s.win);
     });
     dispatch_resume(t);
     self.keeper = t;
