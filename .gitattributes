@@ -1,0 +1,11 @@
+# 源码统一用 LF。Windows 上 core.autocrlf 默认会把换行转成 CRLF，
+# 那样推上去的 Makefile / build.sh 在 Linux 的 CI 里会直接跑不起来。
+* text=auto eol=lf
+
+# 明确标成二进制，避免被当文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary
+*.deb binary
+*.dylib binary

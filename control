@@ -1,0 +1,9 @@
+Package: com.acme.autoclicker
+Name: AutoClicker 自动连点器
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 屏幕任意位置自动连续点击。悬浮球可拖动，面板可设置点击间隔、点击次数、指定单点或拖动框选区域（区域内随机落点）。基于 IOHID 事件注入，无需模拟触摸库。
+Maintainer: acme
+Author: acme
+Section: Tweaks
+Depends: mobilesubstrate

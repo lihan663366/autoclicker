@@ -1,0 +1,14 @@
+# Theos 构建产物
+packages/
+.theos/
+obj/
+*.deb
+
+# 编译中间文件
+*.dylib
+*.o
+*.a
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
