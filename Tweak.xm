@@ -44,7 +44,7 @@
         //   完全没震动      → 根本没注入，去查 Dopamine 的注入开关和安装位置
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            ACDLog(@"=========== AutoClicker 1.4.0 loaded ===========");
+            ACDLog(@"=========== AutoClicker 1.4.1 loaded ===========");
             ACDLog(@"pid=%d host=%@ bundle=%@",
                    (int)getpid(),
                    isSB ? @"SpringBoard" : @"App",

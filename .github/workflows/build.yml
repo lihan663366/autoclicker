@@ -57,9 +57,9 @@ jobs:
           make package FINALPACKAGE=1 DEBUG=0 BUNDLE_ID="$BUNDLE_ID" ROOTFUL=0
           echo "--- 实际注入目标 ---"
           cat AutoClicker.plist
-          mv packages/*.deb out/AutoClicker-1.4.0-rootless.deb
+          mv packages/*.deb out/AutoClicker-1.4.1-rootless.deb
           # 顺手把 dylib 抽出来，给 TrollFools / 手动注入用
-          dpkg-deb -x out/AutoClicker-1.4.0-rootless.deb /tmp/rootless
+          dpkg-deb -x out/AutoClicker-1.4.1-rootless.deb /tmp/rootless
           find /tmp/rootless -name '*.dylib' -exec cp {} out/AutoClicker.dylib \;
 
       - name: Build rootful
@@ -67,7 +67,7 @@ jobs:
           export PATH="$THEOS/bin:$PATH"
           make clean || true
           make package FINALPACKAGE=1 DEBUG=0 BUNDLE_ID="$BUNDLE_ID" ROOTFUL=1
-          mv packages/*.deb out/AutoClicker-1.4.0-rootful.deb
+          mv packages/*.deb out/AutoClicker-1.4.1-rootful.deb
 
       - name: Verify artifacts
         run: |

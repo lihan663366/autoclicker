@@ -254,7 +254,7 @@ static UIView *ACHostFallbackView(void) {
             return;
         }
     } else {
-        ACBuzz(2);   // 一共 2 下：注入成功、窗口是自建的
+        ACBuzz(1);   // 累计 2 下：注入成功 + 自建窗口建好
     }
 
     [self buildIcon];
@@ -363,7 +363,7 @@ static UIView *ACHostFallbackView(void) {
 
     // 版本角标：装错包/装了旧包是最常见的"没效果"来源，一眼就能确认
     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(s - 26, -6, 32, 15)];
-    badge.text = @"1.4";
+    badge.text = @"1.41";
     badge.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.32 alpha:1.0];
     badge.font = [UIFont boldSystemFontOfSize:9.5];
     badge.textAlignment = NSTextAlignmentCenter;
