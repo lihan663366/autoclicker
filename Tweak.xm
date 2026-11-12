@@ -44,12 +44,12 @@
         //   完全没震动      → 根本没注入，去查 Dopamine 的注入开关和安装位置
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            ACDLog(@"=========== AutoClicker 1.3.0 loaded ===========");
+            ACDLog(@"=========== AutoClicker 1.4.0 loaded ===========");
             ACDLog(@"pid=%d host=%@ bundle=%@",
                    (int)getpid(),
                    isSB ? @"SpringBoard" : @"App",
                    [NSBundle mainBundle].bundleIdentifier ?: @"?");
-            AudioServicesPlaySystemSound(kSystemSoundID_Vibrate);
+            ACBuzz(1);   // 第 1 下：dylib 确实被注入了
         });
 
         // SpringBoard 要把窗口体系铺完才有 scene；App 进程快得多

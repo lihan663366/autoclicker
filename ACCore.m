@@ -6,6 +6,7 @@
 #import "ACDebug.h"
 #import <dlfcn.h>
 #import <mach/mach_time.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <objc/message.h>
 
 #pragma mark - 私有 IOHID 接口
@@ -56,6 +57,16 @@ static ACFnSetInteger            sSetInteger   = NULL;
 
 static ACInjectChannel sChannel      = ACInjectChannelNone;
 static BOOL            sUserOverride = NO;   // 用户手动指定过通道后不再自动改
+
+void ACBuzz(int times) {
+    if (times <= 0) return;
+    for (int i = 0; i < times; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.38 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AudioServicesPlaySystemSound(kSystemSoundID_Vibrate);
+        });
+    }
+}
 
 BOOL ACIsSpringBoard(void) {
     static BOOL sb = NO;

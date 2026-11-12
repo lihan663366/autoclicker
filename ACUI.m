@@ -47,19 +47,30 @@ static CGFloat ACSelectLevel(void) {
 
 @end
 
+/// 拿一个能用来建窗的 UIWindowScene。三条路依次试，SpringBoard 上通常要走后两条。
 static UIWindowScene *ACActiveScene(void) {
     UIApplication *app = [UIApplication sharedApplication];
-    UIWindowScene *fallback = nil;
+
+    // 路 1：connectedScenes。普通 App 走这条就够了。
+    UIWindowScene *any = nil;
     for (UIScene *s in app.connectedScenes) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
         if (s.activationState == UISceneActivationStateForegroundActive) return (UIWindowScene *)s;
-        if (!fallback) fallback = (UIWindowScene *)s;
+        if (!any) any = (UIWindowScene *)s;
     }
-    if (fallback) return fallback;
+    if (any) return any;
 
-    // 兜底：SpringBoard 某些版本 connectedScenes 为空，从已有窗口反查 scene
+    // 路 2：从宿主已有的窗口反查。SpringBoard 的 connectedScenes 经常是空集，
+    //       但它自己的主屏窗口带着 scene，这条路才是 SpringBoard 上的正解。
     for (UIWindow *w in app.windows) {
         if (w.windowScene) return w.windowScene;
+    }
+
+    // 路 3：私有 API。前两条都空的时候，UIScreen 还知道当前前台是哪个 scene。
+    SEL fg = NSSelectorFromString(@"_foregroundScene");
+    if ([[UIScreen mainScreen] respondsToSelector:fg]) {
+        id s = ((id (*)(id, SEL))objc_msgSend)([UIScreen mainScreen], fg);
+        if ([s isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)s;
     }
     return nil;
 }
@@ -74,13 +85,9 @@ static void ACShowWindow(UIWindow *w) {
     if (!w) return;
     w.hidden = NO;
 
-    SEL sel = NSSelectorFromString(@"_orderFrontWithoutMakingKey");
-    if ([w respondsToSelector:sel]) {
-        ((void (*)(id, SEL))objc_msgSend)(w, sel);
-        return;
-    }
-
-    // 老系统退路：抢一次 key 再立刻还回去
+    // 私有 _orderFrontWithoutMakingKey 在部分 iOS 16 版本上已经不响应，
+    // respondsToSelector 能过但调用是空转 —— 那就白显示了。这里直接用公开 API：
+    // 抢一次 key 把它顶上台面，再立刻把 key 还给原来的窗口。
     UIWindow *prev = [UIApplication sharedApplication].keyWindow;
     [w makeKeyAndVisible];
     if (prev && prev != w) [prev makeKeyWindow];
@@ -197,9 +204,9 @@ static UIView *ACHostFallbackView(void) {
         }
     }
 
-    if (!ready && attempt < 16) {
+    if (!ready && attempt < 20) {
         __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [weakSelf setupAttempt:attempt + 1];
         });
@@ -226,9 +233,28 @@ static UIView *ACHostFallbackView(void) {
             self.fellBack = YES;
             self.win.hidden = YES;   // 万一它哪天又上屏了，别出现两个球
             ACDLog(@"!! 没有 windowScene，已改挂宿主窗口 %@", NSStringFromClass([host class]));
+            ACBuzz(2);               // 一共 3 下：注入成功但窗口是兜底挂的
         } else {
-            ACDLog(@"!! 没有 windowScene，也没有可用的宿主窗口");
+            // 自建窗口和宿主窗口都拿不到，说明 SpringBoard 这会儿还没把窗口体系铺完。
+            // 别放弃，1 秒后再来 —— 放弃就等于屏幕上什么都没有。
+            ACDLog(@"!! 无 scene 也无宿主窗口，1 秒后重试（第 %ld 次）", (long)attempt);
+            self.didSetup = NO;
+            self.win = nil;
+
+            if (attempt < 60) {
+                __weak typeof(self) weakSelf = self;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [weakSelf setupAttempt:attempt + 1];
+                });
+            } else {
+                ACBuzz(3);
+                ACDLog(@"!! 放弃：60 次都没拿到任何可用窗口");
+            }
+            return;
         }
+    } else {
+        ACBuzz(2);   // 一共 2 下：注入成功、窗口是自建的
     }
 
     [self buildIcon];
@@ -337,7 +363,7 @@ static UIView *ACHostFallbackView(void) {
 
     // 版本角标：装错包/装了旧包是最常见的"没效果"来源，一眼就能确认
     UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(s - 26, -6, 32, 15)];
-    badge.text = @"1.3";
+    badge.text = @"1.4";
     badge.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.32 alpha:1.0];
     badge.font = [UIFont boldSystemFontOfSize:9.5];
     badge.textAlignment = NSTextAlignmentCenter;

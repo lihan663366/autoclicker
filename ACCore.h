@@ -17,6 +17,12 @@ typedef NS_ENUM(NSInteger, ACInjectChannel) {
     ACInjectChannelEnqueue   = 2,   // -[UIApplication _enqueueHIDEvent:]（App 内可用，无需 entitlement）
 };
 
+/// 用震动次数编码状态，不依赖任何界面、日志、文件权限。
+///   1 下 = dylib 已注入
+///   2 下 = 窗口已建成
+///   3 下 = 注入成功但窗口建不出来（走了兜底或彻底失败）
+void ACBuzz(int times);
+
 /// 当前宿主是不是 SpringBoard（决定窗口层级、建窗时机、注入通道）
 BOOL ACIsSpringBoard(void);
 
