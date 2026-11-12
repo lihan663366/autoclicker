@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential fakeroot rsync curl perl git libxml2 xz-utils file dpkg
+            build-essential fakeroot rsync curl perl git xz-utils file dpkg
           # 非 Swift 工具链要 libtinfo，不同 Ubuntu 版本包名不一样
           sudo apt-get install -y libtinfo5 || sudo apt-get install -y libtinfo6 || true
 
