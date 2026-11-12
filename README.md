@@ -19,9 +19,13 @@ iOS 越狱插件。注入 SpringBoard，屏幕上常驻一个可拖动的悬浮�
 
 ## 编译
 
-### 方式 A：GitHub Actions（最省事，不用装环境）
+### 方式 A：GitHub Actions（已配好，push 就出包）
 
-把 `autoclicker/` 整个目录推到一个 GitHub 仓库，Actions 会自动编译，产物在 Artifacts 里的 `AutoClicker-deb`。
+仓库：<https://github.com/lihan663366/autoclicker>
+
+往 `main` 推提交就自动构建。跑在 `ubuntu-latest` 上 —— macOS runner 在这个账号不可用（实测 job 会在 1 秒内被取消、一个 step 都不执行），所以走的是 Linux 路线：`L1ghtmann/llvm-project` 的预编译 iOS 工具链 + `theos/sdks`。
+
+产物路径：Actions 页面 → 对应的 run → Artifacts → `AutoClicker-deb`。
 
 ### 方式 B：本地 Theos（macOS 或 Linux/WSL）
 
@@ -49,6 +53,17 @@ cp -R /tmp/sdks/*.sdk $THEOS/sdks/
 如果你是 unc0ver / checkra1n / palera1n **rootful**，把那一行注释掉再编译，否则装不上。
 
 ---
+
+## 已验证的构建结果
+
+CI 实跑产出的 deb（23 KB）拆开确认过：
+
+- `control` → `Architecture: iphoneos-arm64`、`Depends: mobilesubstrate`
+- 安装路径 `var/jb/Library/MobileSubstrate/DynamicLibraries/`
+- `AutoClicker.dylib` 203,936 字节，**FAT 双架构**：arm64 (cpusub 0) + arm64e (cpusub 2)
+- `AutoClicker.plist` 随包一起装进同一目录
+
+两个切片都在，Dopamine / palera1n rootless 都能加载。
 
 ## 安装
 
