@@ -103,40 +103,57 @@ cp -R /tmp/sdks/*.sdk $THEOS/sdks/
 
 ### rootless vs rootful
 
-`Makefile` 默认开着 `THEOS_PACKAGE_SCHEME = rootless`，对应 Dopamine、palera1n rootless、XinaA15。
+`Makefile` 默认 `THEOS_PACKAGE_SCHEME = rootless`，对应 Dopamine、palera1n rootless、XinaA15。
 
-unc0ver / checkra1n / palera1n **rootful** 把那一行注释掉，否则装不上。
+unc0ver / checkra1n / palera1n **rootful** 加参数编译：
+
+```bash
+make package ROOTFUL=1
+```
+
+**这一项装错是最常见的"包能装、但完全没反应"**：rootless 包的 dylib 落在 `/var/jb/Library/MobileSubstrate/DynamicLibraries/`，老越狱只读根目录，Substrate 永远加载不到它。CI 两个版都出，装一个不行就换另一个，30 秒就能排除。
 
 ---
 
 ## 已验证的构建结果
 
-CI 实跑产出的 deb（23 KB）拆开确认过：
+CI 实跑产出的 deb 拆开确认过：
 
-- `control` → `Architecture: iphoneos-arm64`、`Depends: mobilesubstrate`
-- 安装路径 `var/jb/Library/MobileSubstrate/DynamicLibraries/`
-- `AutoClicker.dylib` 203,936 字节，**FAT 双架构**：arm64 (cpusub 0) + arm64e (cpusub 2)
+- `control` → `Architecture: iphoneos-arm64`（rootless）/ `iphoneos-arm`（rootful）
+- 安装路径 `var/jb/Library/MobileSubstrate/DynamicLibraries/`（rootless）
+- `AutoClicker.dylib` **FAT 双架构**：arm64 (cpusub 0) + arm64e (cpusub 2)
 - `AutoClicker.plist` 随包一起装进同一目录
 
 ---
 
 ## 安装
 
+三条路，按你的环境选。
+
+**① 越狱设备（推荐）** — 装 deb
+
 ```bash
-# 把 deb 传到手机后
-dpkg -i com.acme.autoclicker_1.0.0_iphoneos-arm64.deb
-# 或直接 sileo / zebra 里点开安装
+# 传到手机后
+dpkg -i AutoClicker-1.2.0-rootless.deb     # rootful 就用 rootful 那个
 
 # 全局版：重启桌面进程
 killall -9 SpringBoard
 
 # App 版：重启目标 App（不用动 SpringBoard）
-killall -9 WeChat    # 或直接上滑杀掉再打开
+killall -9 WeChat
 ```
 
 rootless 越狱的实际安装路径是 `/var/jb/Library/MobileSubstrate/DynamicLibraries/AutoClicker.dylib`。
 
+**② 没有越狱，但有 TrollStore** — 用 TrollFools 注入 `AutoClicker.dylib`
+
+TrollFools 里选目标 App → 导入 `AutoClicker.dylib` → 注入 → 重开 App。这条路不需要越狱，也不需要改 IPA。注入后走的就是 App 通道（`_enqueueHIDEvent:`），浮球只出现在那个 App 里。
+
+**③ 手动注入 IPA** — 把 dylib 塞进 App 的 `Frameworks/` 并在主二进制加 `LC_LOAD_DYLIB`，重签后用 TrollStore 装。
+
 **球出现 = 插件加载成功**，这是最快的自检方式。App 版要先进到那个 App 里才看得到球。
+
+> 这个 tweak **没有**「设置 → AutoClicker」那样的系统设置面板。所有参数都在浮球点开的面板里。设置里找不到是正常的，不代表没装好。
 
 ---
 
@@ -151,22 +168,53 @@ rootless 越狱的实际安装路径是 `/var/jb/Library/MobileSubstrate/Dynamic
 5. 点绿色「开 始」→ 面板自动收起，按钮变红「停 止」，再点球可看实时次数
 6. 要停就再点一次
 
-参数全部自动保存，下次打开还是上次的状态。
+参数全部自动保存，下次打开还是上次的状态。浮球右上角的红字是版本号，装错包一眼能认出来。
+
+### 面板底部两个按钮
+
+**「通道：xxx」** — 点一下在 `HID 派发` → `事件队列` → `不可用` 之间轮换。
+
+两条注入通道在不同 iOS 版本上有效性不一样，自动探测有可能选错。表现就是「面板显示正常运行、次数也在涨，但目标毫无反应」。这种情况手动切一次通道，多半立刻就好了。切换会写进日志。
+
+**「查看日志」** — 直接看运行日志，不用连电脑。
+
+日志同时写在 `/var/mobile/Library/Logs/AutoClicker.log`，用 Filza / SSH 也能读。
 
 ---
 
 ## 出问题怎么查
 
+先看日志。装完打开浮球面板 → 「查看日志」，或者：
+
+```bash
+cat /var/mobile/Library/Logs/AutoClicker.log
+```
+
+正常加载的日志长这样：
+
+```
+[20:31:02.114] SpringBoard/1024  =========== AutoClicker 1.2.0 loaded ===========
+[20:31:02.115] SpringBoard/1024  host=SpringBoard isSpringBoard=1 bundle=com.apple.springboard pid=1024
+[20:31:02.116] SpringBoard/1024  symbols: dispatch=1 createEvent=1 createFinger=1 append=1 typedCreate=1
+[20:31:02.117] SpringBoard/1024  client created with type=1
+[20:31:02.118] SpringBoard/1024  channel = HID 派发 (canDispatch=1 clientType=1 canEnqueue=1)
+[20:31:05.203] SpringBoard/1024  window built: level=10000200 ...
+[20:31:05.260] SpringBoard/1024  setup done, channel=HID 派发
+```
+
+**日志文件都不存在** = dylib 没被加载，跟功能无关，是安装层问题。
+
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 没有圆球（全局版） | tweak 没加载 | `dpkg -l \| grep autoclicker`；`killall -9 SpringBoard`；rootless/rootful 用错版会在这一步暴露 |
-| 没有圆球（App 版） | 没进目标 App，或 bundle id 写错 | 确认 `AutoClicker.plist` 里的 id 和 App 一致；`killall -9 <App>` 重开 |
-| 面板显示「不可用」 | App 内 `_enqueueHIDEvent:` 不存在 | 这个 iOS 版本移除了该私有方法，改用全局版 |
-| 面板显示正常但点了没反应 | 通道探测误判，或落点被遮 | 先换「选 点」精确点一次试；仍无效就改用全局版 |
+| 设置里找不到 AutoClicker | 这个 tweak 没有系统设置面板 | 正常现象，参数全在浮球面板里 |
+| 没有圆球，日志也没有 | dylib 没加载 | 换 rootful / rootless 另一版；`killall -9 SpringBoard`；确认越狱已启用 tweak 注入 |
+| 没有圆球，日志有 `loaded` 但卡在后面 | 建窗失败 | 看日志里 `window built` 那行，把日志发我 |
+| 面板显示「不可用」 | 两条通道都探不到 | 点「通道」手动切；仍不行说明该系统版本移除了两个私有接口 |
+| 面板正常、次数在涨，但目标没反应 | 通道选错 | 点「通道」切到另一个再试 —— 这是 90% 的原因 |
 | 点击位置**偏移**到左上角 | 坐标多乘了一次 scale | `ACCore.m` 里 `const CGFloat k = ACScale();` 改成 `k = 1.0` 重新编译 |
 | 只有一半屏幕能点 | 反过来，需要乘 scale | 保持 `ACScale()`；或试 `k = ACScale() * 2` |
 | 点得太快目标没响应 | 部分控件需要 >20ms 按压 | 间隔调到 0.05 以上 |
-| 目标 App 一启动就闪退 | App 有反注入/完整性校验 | 这插件只注入目标 App，换 App 或改用全局版 |
+| 目标 App 一启动就闪退 | App 有反注入/完整性校验 | 换 App，或改用全局版 |
 | 横屏下位置错乱 | 未做旋转换算 | 当前只适配竖屏 |
 
 ### 坐标系说明
@@ -181,11 +229,12 @@ rootless 越狱的实际安装路径是 `/var/jb/Library/MobileSubstrate/Dynamic
 
 ```
 autoclicker/
-├── Makefile                  # 按 BUNDLE_ID 生成 Filter plist；rootless 开关在首行
+├── Makefile                  # 按 BUNDLE_ID 生成 Filter plist；ROOTFUL=1 切 rootful
 ├── control                   # deb 元信息
-├── Tweak.xm                  # 入口，按宿主决定延迟
+├── Tweak.xm                  # 入口，按宿主决定延迟，第一件事就是写日志
 ├── ACCore.h / ACCore.m       # 双通道触摸注入 + 连点引擎（dispatch_source 定时器）
-├── ACUI.h / ACUI.m           # 悬浮球、设置面板、框选遮罩
+├── ACDebug.h / ACDebug.m     # 落盘日志（越狱环境没调试器，只能靠它）
+├── ACUI.h / ACUI.m           # 悬浮球、设置面板、框选遮罩、通道切换、日志查看
 └── .github/workflows/build.yml
 ```
 
@@ -205,6 +254,18 @@ IOHIDEventSystemClientDispatchEvent(client, down);
 IOHIDEventSystemClientDispatchEvent(client, up);
 ```
 
+**注意 iOS 15+ 的坑**：`IOHIDEventSystemClientCreate()` 返回的 default client 已经不能派发了 —— 返回非 NULL，`DispatchEvent` 不报错，事件被静默丢弃。这正是「代码看着没问题、点了完全没反应」的头号原因。
+
+必须用带类型的创建函数，Monitor 类型才能派发：
+
+```objc
+// kIOHIDEventSystemClientTypeMonitor = 1
+IOHIDEventSystemClientRef client =
+    IOHIDEventSystemClientCreateWithType(kCFAllocatorDefault, 1, NULL);
+```
+
+代码里先试 Monitor，失败再退 legacy create，并通过 `sClientType` 记录下来 —— 如果最终是 default 类型，SpringBoard 也会改走事件队列通道，而不是硬派发。
+
 **App 内（事件队列）**
 
 ```objc
@@ -220,7 +281,9 @@ IOHIDEventAppendEvent(hand, finger, 0);
 
 ### 为什么注入前要让开浮窗
 
-App 版里浮窗和被点的对象在同一个进程、同一条事件路径上。浮窗层级是 `UIWindowLevelAlert + 1000`，如果落点正好压在浮球或面板上，点到的是自己。所以引擎每次注入前把浮窗的 `userInteractionEnabled` 关掉一瞬，注入完立刻恢复（`ACEngine` 的 `willTap` / `didTap` 回调）。另外点「开始」时会自动收起面板。
+App 版里浮窗和被点的对象在同一个进程、同一条事件路径上。浮窗层级是 `UIWindowLevelAlert + 1000`，如果落点正好压在浮球或面板上，点到的是自己。
+
+所以引擎每次注入前把浮窗的 `userInteractionEnabled` 关掉。**关键细节：恢复必须延迟 120ms**。注入的 down 和 up 之间隔 8ms，如果 tap 返回就立刻恢复，down 会落到 App、up 会落到浮窗，App 收到的是一次没有抬起的按下 —— 什么都不触发。这个 bug 极难从现象上看出来（次数在涨、日志正常），第一版就是这么写的。
 
 ---
 

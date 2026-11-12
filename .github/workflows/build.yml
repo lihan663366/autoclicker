@@ -47,27 +47,58 @@ jobs:
           echo "--- sdks ---"
           ls "$THEOS/sdks/"
 
-      - name: Build package
+      # rootless 和 rootful 装的是同一个 dylib，只是安装根不同。
+      # 装错这一项的表现就是"包能装、但完全没反应"，所以两个都出。
+      - name: Build rootless
+        run: |
+          export PATH="$THEOS/bin:$PATH"
+          mkdir -p out
+          make clean || true
+          make package FINALPACKAGE=1 DEBUG=0 BUNDLE_ID="$BUNDLE_ID" ROOTFUL=0
+          echo "--- 实际注入目标 ---"
+          cat AutoClicker.plist
+          mv packages/*.deb out/AutoClicker-1.2.0-rootless.deb
+          # 顺手把 dylib 抽出来，给 TrollFools / 手动注入用
+          dpkg-deb -x out/AutoClicker-1.2.0-rootless.deb /tmp/rootless
+          find /tmp/rootless -name '*.dylib' -exec cp {} out/AutoClicker.dylib \;
+
+      - name: Build rootful
         run: |
           export PATH="$THEOS/bin:$PATH"
           make clean || true
-          make package FINALPACKAGE=1 DEBUG=0 BUNDLE_ID="$BUNDLE_ID"
-          echo "--- 实际注入目标 ---"
-          cat AutoClicker.plist
+          make package FINALPACKAGE=1 DEBUG=0 BUNDLE_ID="$BUNDLE_ID" ROOTFUL=1
+          mv packages/*.deb out/AutoClicker-1.2.0-rootful.deb
 
-      - name: Show artifacts
-        if: always()
-        run: ls -lh packages/ || true
+      - name: Verify artifacts
+        run: |
+          ls -lh out/
+          for f in out/*.deb; do
+            echo "=== $f ==="
+            dpkg-deb -f "$f" Package Version Architecture
+            dpkg-deb -c "$f" | grep -E 'dylib|plist'
+          done
+          file out/AutoClicker.dylib
+          echo "--- dylib 里的架构 ---"
+          lipo -info out/AutoClicker.dylib 2>/dev/null || \
+            python3 -c "
+import struct
+d=open('out/AutoClicker.dylib','rb').read()
+n=struct.unpack('>I',d[4:8])[0]
+print('fat slices:',n)
+for i in range(n):
+    cpu,sub,o,sz,al=struct.unpack('>iiIII',d[8+i*20:8+i*20+20])
+    print('  cpu=%d sub=%d size=%d'%(cpu,sub,sz))
+"
 
       - name: Resolve artifact name
         id: name
         run: |
           safe=$(echo "$BUNDLE_ID" | tr '.,' '__')
-          echo "value=AutoClicker-deb-$safe" >> "$GITHUB_OUTPUT"
+          echo "value=AutoClicker-$safe" >> "$GITHUB_OUTPUT"
 
-      - name: Upload deb
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.name.outputs.value }}
-          path: packages/*.deb
+          path: out/*
           if-no-files-found: error

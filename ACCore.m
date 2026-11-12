@@ -3,6 +3,7 @@
 //
 
 #import "ACCore.h"
+#import "ACDebug.h"
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <objc/message.h>
@@ -19,9 +20,21 @@ enum {
     kACEventTouch     = 1 << 1, // kIOHIDDigitizerEventTouch
 };
 
+/// IOHIDEventSystemClientType
+/// iOS 15 起 IOHIDEventSystemClientCreate() 返回的 default client 已经不能派发事件：
+/// 调用 IOHIDEventSystemClientDispatchEvent 不报错，但事件被静默丢弃。
+/// 必须显式创建 Monitor / Administrator 类型的 client。
+enum {
+    kACClientTypeDefault       = 0,
+    kACClientTypeMonitor       = 1,
+    kACClientTypeAdministrator = 2,
+};
+
 typedef IOHIDEventSystemClientRef (*ACFnCreateClient)(CFAllocatorRef);
+typedef IOHIDEventSystemClientRef (*ACFnCreateClientWithType)(CFAllocatorRef, int, CFDictionaryRef);
 typedef void (*ACFnSchedule)(IOHIDEventSystemClientRef, CFRunLoopRef, CFStringRef);
 typedef void (*ACFnDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
+typedef void (*ACFnSetProperty)(IOHIDEventSystemClientRef, CFStringRef, CFTypeRef);
 typedef IOHIDEventRef (*ACFnCreateEvent)(CFAllocatorRef, uint64_t, int,
                                          uint32_t, uint32_t, uint32_t, uint32_t,
                                          double, double, double, double, double,
@@ -31,14 +44,18 @@ typedef IOHIDEventRef (*ACFnCreateFinger)(CFAllocatorRef, uint64_t,
                                           double, double, double, double, double,
                                           bool, bool, uint32_t);
 typedef void (*ACFnAppend)(IOHIDEventRef, IOHIDEventRef, uint32_t);
+typedef void (*ACFnSetInteger)(IOHIDEventRef, uint32_t, int64_t);
 
-static IOHIDEventSystemClientRef sClient      = NULL;
-static ACFnDispatch              sDispatch    = NULL;
-static ACFnCreateEvent           sCreateEvent = NULL;
+static IOHIDEventSystemClientRef sClient       = NULL;
+static int                       sClientType   = -1;
+static ACFnDispatch              sDispatch     = NULL;
+static ACFnCreateEvent           sCreateEvent  = NULL;
 static ACFnCreateFinger          sCreateFinger = NULL;
-static ACFnAppend                sAppend      = NULL;
+static ACFnAppend                sAppend       = NULL;
+static ACFnSetInteger            sSetInteger   = NULL;
 
-static ACInjectChannel sChannel = ACInjectChannelNone;
+static ACInjectChannel sChannel      = ACInjectChannelNone;
+static BOOL            sUserOverride = NO;   // 用户手动指定过通道后不再自动改
 
 BOOL ACIsSpringBoard(void) {
     static BOOL sb = NO;
@@ -46,6 +63,9 @@ BOOL ACIsSpringBoard(void) {
     dispatch_once(&once, ^{
         NSString *n = [NSProcessInfo processInfo].processName;
         sb = [n isEqualToString:@"SpringBoard"];
+        ACDLog(@"host=%@ isSpringBoard=%d bundle=%@ pid=%d",
+               n, sb, [NSBundle mainBundle].bundleIdentifier ?: @"?",
+               (int)getpid());
     });
     return sb;
 }
@@ -54,19 +74,47 @@ static void ACEnsureSymbols(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         void *h = dlopen("/System/Library/PrivateFrameworks/IOKit.framework/IOKit", RTLD_LAZY);
-        if (!h) return;
-        ACFnCreateClient createClient = (ACFnCreateClient)dlsym(h, "IOHIDEventSystemClientCreate");
-        ACFnSchedule     schedule     = (ACFnSchedule)dlsym(h, "IOHIDEventSystemClientScheduleWithRunLoop");
+        if (!h) {
+            ACDLog(@"!! dlopen IOKit failed: %s", dlerror());
+            return;
+        }
+
+        ACFnCreateClient          createPlain = (ACFnCreateClient)dlsym(h, "IOHIDEventSystemClientCreate");
+        ACFnCreateClientWithType  createTyped = (ACFnCreateClientWithType)dlsym(h, "IOHIDEventSystemClientCreateWithType");
+        ACFnSchedule              schedule    = (ACFnSchedule)dlsym(h, "IOHIDEventSystemClientScheduleWithRunLoop");
+        ACFnSetProperty           setProp     = (ACFnSetProperty)dlsym(h, "IOHIDEventSystemClientSetProperty");
+
         sDispatch     = (ACFnDispatch)dlsym(h, "IOHIDEventSystemClientDispatchEvent");
         sCreateEvent  = (ACFnCreateEvent)dlsym(h, "IOHIDEventCreateDigitizerEvent");
         sCreateFinger = (ACFnCreateFinger)dlsym(h, "IOHIDEventCreateDigitizerFingerEvent");
         sAppend       = (ACFnAppend)dlsym(h, "IOHIDEventAppendEvent");
-        if (createClient) {
-            sClient = createClient(kCFAllocatorDefault);
-            if (sClient && schedule) {
-                schedule(sClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+        sSetInteger   = (ACFnSetInteger)dlsym(h, "IOHIDEventSetIntegerValue");
+
+        ACDLog(@"symbols: dispatch=%d createEvent=%d createFinger=%d append=%d typedCreate=%d",
+               sDispatch != NULL, sCreateEvent != NULL, sCreateFinger != NULL,
+               sAppend != NULL, createTyped != NULL);
+
+        // iOS 15+ 必须用带 type 的创建函数，Monitor 类型才能派发
+        if (createTyped) {
+            for (int t = kACClientTypeMonitor; t >= kACClientTypeDefault; t--) {
+                IOHIDEventSystemClientRef c = createTyped(kCFAllocatorDefault, t, NULL);
+                if (!c) continue;
+                if (schedule) schedule(c, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+                // 只订阅 digitizer 页，某些系统上不设会收不到/发不出
+                if (setProp) setProp(c, CFSTR("PrimaryUsagePage"), (__bridge CFTypeRef)@(0x0D));
+                sClient = c;
+                sClientType = t;
+                ACDLog(@"client created with type=%d", t);
+                break;
             }
         }
+        if (!sClient && createPlain) {
+            sClient = createPlain(kCFAllocatorDefault);
+            if (sClient && schedule) schedule(sClient, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+            sClientType = kACClientTypeDefault;
+            ACDLog(@"client created with legacy IOHIDEventSystemClientCreate (type=0)");
+        }
+        if (!sClient) ACDLog(@"!! 所有 client 创建失败");
     });
 }
 
@@ -91,6 +139,16 @@ ACInjectChannel ACInjectActiveChannel(void) {
     return sChannel;
 }
 
+/// 用户在面板上手动切换通道。两条路在不同系统版本上有效性不一样，
+/// 自动猜错的时候让用户自己试一次最快。
+void ACSetInjectChannel(ACInjectChannel ch) {
+    sUserOverride = YES;
+    sChannel = ch;
+    ACDLog(@"channel overridden by user -> %@", ACInjectChannelName(ch));
+}
+
+BOOL ACIsChannelOverridden(void) { return sUserOverride; }
+
 ACInjectChannel ACRefreshInjectChannel(void) {
     ACEnsureSymbols();
 
@@ -99,16 +157,32 @@ ACInjectChannel ACRefreshInjectChannel(void) {
                            respondsToSelector:NSSelectorFromString(@"_enqueueHIDEvent:")]
                        && sCreateEvent != NULL;
 
+    if (sUserOverride) {
+        ACDLog(@"channel kept (user override) = %@", ACInjectChannelName(sChannel));
+        return sChannel;
+    }
+
     if (ACIsSpringBoard()) {
-        // SpringBoard 有 HID entitlement，走系统级派发能把点击送到任意 App
-        if (canDispatch)      sChannel = ACInjectChannelDispatch;
-        else if (canEnqueue)  sChannel = ACInjectChannelEnqueue;
-        else                  sChannel = ACInjectChannelNone;
+        // SpringBoard 有 HID entitlement，派发能把点击送到任意 App。
+        // 但如果 client 是 legacy default 类型，派发在 iOS 15+ 会静默失效 —— 此时用事件队列，
+        // SpringBoard 的 _enqueueHIDEvent: 就是系统事件入口，同样会转发给前台 App。
+        if (canDispatch && sClientType != kACClientTypeDefault) {
+            sChannel = ACInjectChannelDispatch;
+        } else if (canEnqueue) {
+            sChannel = ACInjectChannelEnqueue;
+        } else if (canDispatch) {
+            sChannel = ACInjectChannelDispatch;
+        } else {
+            sChannel = ACInjectChannelNone;
+        }
     } else {
         // App 进程没有 HID entitlement，派发调用会静默失败。
         // 这里绝不能退到 dispatch，否则界面显示"正常"但一次都点不动。
         sChannel = canEnqueue ? ACInjectChannelEnqueue : ACInjectChannelNone;
     }
+
+    ACDLog(@"channel = %@ (canDispatch=%d clientType=%d canEnqueue=%d)",
+           ACInjectChannelName(sChannel), canDispatch, sClientType, canEnqueue);
     return sChannel;
 }
 
@@ -147,31 +221,22 @@ static IOHIDEventRef ACMakeHand(CGPoint point, BOOL down) {
 
 #pragma mark - 注入实现
 
-/// 系统级派发：只有 SpringBoard 这类带 HID entitlement 的进程能成功
+/// 系统级派发：需要带 HID entitlement 的进程 + 非 default 类型的 client
 static void ACInjectViaDispatch(CGPoint point) {
-    if (!sClient || !sDispatch || !sCreateEvent) return;
+    if (!sClient || !sDispatch || !sCreateEvent) {
+        ACDLog(@"!! dispatch 通道符号缺失，跳过");
+        return;
+    }
 
-    const CGFloat k = ACScale();
-    double x = point.x * k;
-    double y = point.y * k;
-
-    IOHIDEventRef down = sCreateEvent(kCFAllocatorDefault, mach_absolute_time(),
-                                      kACTransducerHand, 0, 1,
-                                      kACEventRange | kACEventTouch, 0,
-                                      x, y, 0.0, 1.0, 0.0,
-                                      true, true, 0);
-    if (!down) return;
+    IOHIDEventRef down = ACMakeHand(point, YES);
+    if (!down) { ACDLog(@"!! 构造 down 事件失败"); return; }
     sDispatch(sClient, down);
     CFRelease(down);
 
     // 8ms 后再抬起，太快会被系统合并成一次无效触摸
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_MSEC)),
                    dispatch_get_main_queue(), ^{
-        IOHIDEventRef up = sCreateEvent(kCFAllocatorDefault, mach_absolute_time(),
-                                        kACTransducerHand, 0, 1,
-                                        0, 0,
-                                        x, y, 0.0, 0.0, 0.0,
-                                        false, false, 0);
+        IOHIDEventRef up = ACMakeHand(point, NO);
         if (!up) return;
         sDispatch(sClient, up);
         CFRelease(up);
@@ -183,7 +248,10 @@ static void ACInjectViaDispatch(CGPoint point) {
 static void ACInjectViaEnqueue(CGPoint point) {
     UIApplication *app = [UIApplication sharedApplication];
     SEL sel = NSSelectorFromString(@"_enqueueHIDEvent:");
-    if (![app respondsToSelector:sel]) return;
+    if (![app respondsToSelector:sel]) {
+        ACDLog(@"!! UIApplication 没有 _enqueueHIDEvent:");
+        return;
+    }
 
     typedef void (*ACFnSend)(id, SEL, id);
     ACFnSend send = (ACFnSend)objc_msgSend;
@@ -191,7 +259,7 @@ static void ACInjectViaEnqueue(CGPoint point) {
     // 事件交给 UIKit 后不能立刻释放：不同系统版本对 _enqueueHIDEvent: 内部持有
     // 的时机不一致，立刻 CFRelease 有 use-after-free 的风险。延迟 1 秒回收。
     IOHIDEventRef down = ACMakeHand(point, YES);
-    if (!down) return;
+    if (!down) { ACDLog(@"!! 构造 down 事件失败"); return; }
     send(app, sel, (__bridge id)down);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ CFRelease(down); });
@@ -206,8 +274,16 @@ static void ACInjectViaEnqueue(CGPoint point) {
     });
 }
 
+static NSInteger sTapLogBudget = 8;   // 只记录前几次点击，避免日志刷爆
+
 void ACInjectTap(CGPoint point) {
     if (sChannel == ACInjectChannelNone) ACRefreshInjectChannel();
+
+    if (sTapLogBudget > 0) {
+        sTapLogBudget--;
+        ACDLog(@"tap (%.1f, %.1f) via %@ scale=%.1f",
+               point.x, point.y, ACInjectChannelName(sChannel), ACScale());
+    }
 
     switch (sChannel) {
         case ACInjectChannelDispatch: ACInjectViaDispatch(point); break;
@@ -266,6 +342,7 @@ CGPoint ACRandomPointInRect(CGRect rect) {
 
     _tapCount = 0;
     _running  = YES;
+    sTapLogBudget = 8;
 
     NSTimeInterval iv = _interval;
     if (iv < 0.02) iv = 0.02;
@@ -273,6 +350,11 @@ CGPoint ACRandomPointInRect(CGRect rect) {
 
     uint64_t intervalNs = (uint64_t)(iv * (double)NSEC_PER_SEC);
     uint64_t leewayNs   = (uint64_t)(2 * NSEC_PER_MSEC);
+
+    ACDLog(@"engine start: interval=%.3fs max=%ld mode=%ld point=(%.1f,%.1f) region=(%.1f,%.1f,%.1f,%.1f) channel=%@",
+           iv, (long)_maxTaps, (long)_mode, _point.x, _point.y,
+           _region.origin.x, _region.origin.y, _region.size.width, _region.size.height,
+           ACInjectChannelName(ACInjectActiveChannel()));
 
     dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.queue);
     dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, (int64_t)intervalNs),
@@ -313,6 +395,7 @@ CGPoint ACRandomPointInRect(CGRect rect) {
         dispatch_source_cancel(self.timer);
         self.timer = nil;
     }
+    ACDLog(@"engine stop: total=%ld", (long)_tapCount);
     [self saveSettings];
     [self notify];
 }

@@ -4,11 +4,12 @@
 
 #import "ACUI.h"
 #import "ACCore.h"
+#import "ACDebug.h"
 #import <math.h>
 
 #define AC_ICON_SIZE 56.0
 #define AC_PANEL_W   280.0
-#define AC_PANEL_H   384.0
+#define AC_PANEL_H   424.0
 #define AC_SIDE      16.0
 
 static const CGFloat kACWindowLevel    = 10000200.0;   // SpringBoard 下的悬浮球层
@@ -93,6 +94,8 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 @property (nonatomic, strong) UISlider *intervalSlider;
 @property (nonatomic, strong) UISlider *countSlider;
 @property (nonatomic, strong) UIButton *actionBtn;
+@property (nonatomic, strong) UIButton *channelBtn;
+@property (nonatomic, strong) UIView   *logView;
 
 @property (nonatomic, strong) ACWindow *selWin;
 @property (nonatomic, strong) UIView   *selRect;
@@ -144,6 +147,10 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
     ACRefreshInjectChannel();
     self.win = ACMakeWindow(ACIconLevel());
+    ACDLog(@"window built: level=%.0f frame=%@ hidden=%d scene=%@",
+           self.win.windowLevel, NSStringFromCGRect(self.win.frame),
+           self.win.hidden,
+           self.win.windowScene ? @"yes" : @"nil");
 
     [self buildIcon];
     [self buildPanel];
@@ -154,17 +161,23 @@ static ACWindow *ACMakeWindow(CGFloat level) {
         [s refreshUI];
     };
 
-    // 注入到本进程时，悬浮窗自己也在事件路径上 —— 每次点击前让开一瞬
+    // 注入到本进程时，悬浮窗自己也在事件路径上 —— 每次点击前让开一瞬。
+    // 关键：恢复必须延迟到 up 事件也发完之后，否则 down 落到 App、up 落到浮窗，
+    // App 收到的是一次没有抬起的按下，什么都不会触发。
     [ACEngine shared].willTap = ^{
         __strong typeof(self) s = weakSelf;
         s.win.userInteractionEnabled = NO;
     };
     [ACEngine shared].didTap = ^{
         __strong typeof(self) s = weakSelf;
-        s.win.userInteractionEnabled = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)),
+                       dispatch_get_main_queue(), ^{
+            s.win.userInteractionEnabled = YES;
+        });
     };
 
     [self refreshUI];
+    ACDLog(@"setup done, channel=%@", ACInjectChannelName(ACInjectActiveChannel()));
 }
 
 #pragma mark 悬浮球
@@ -216,6 +229,18 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
     [self.win.rootViewController.view addSubview:v];
     self.icon = v;
+
+    // 版本角标：装错包/装了旧包是最常见的"没效果"来源，一眼就能确认
+    UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(s - 26, -6, 32, 15)];
+    badge.text = @"1.2";
+    badge.textColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.32 alpha:1.0];
+    badge.font = [UIFont boldSystemFontOfSize:9.5];
+    badge.textAlignment = NSTextAlignmentCenter;
+    badge.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.75];
+    badge.layer.cornerRadius = 5;
+    badge.layer.masksToBounds = YES;
+    badge.userInteractionEnabled = NO;
+    [v addSubview:badge];
 
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     CGFloat x = [d doubleForKey:@"ac_icon_x"];
@@ -367,13 +392,30 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     clear.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     [p addSubview:clear];
 
-    UIView *line2 = [[UIView alloc] initWithFrame:CGRectMake(AC_SIDE, 314, innerW, 0.5)];
+    UIView *line2 = [[UIView alloc] initWithFrame:CGRectMake(AC_SIDE, 312, innerW, 0.5)];
     line2.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
     [p addSubview:line2];
 
+    // 注入通道切换 + 日志。两条注入路在不同系统版本上有效性不一样，
+    // 自动选错时让用户自己试一次最快。
+    CGFloat hw = (innerW - 10) / 2.0;
+    UIButton *chBtn = [self makeButton:@"通道" action:@selector(onSwitchChannel)];
+    chBtn.frame = CGRectMake(AC_SIDE, 320, hw, 32);
+    chBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    chBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
+    chBtn.titleLabel.minimumScaleFactor = 0.75;
+    [p addSubview:chBtn];
+    self.channelBtn = chBtn;
+
+    UIButton *logBtn = [self makeButton:@"查看日志" action:@selector(showLog)];
+    logBtn.frame = CGRectMake(AC_SIDE + hw + 10, 320, hw, 32);
+    logBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    logBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
+    [p addSubview:logBtn];
+
     // 主按钮
     UIButton *act = [self makeButton:@"开 始" action:@selector(onAction)];
-    act.frame = CGRectMake(AC_SIDE, 328, innerW, 44);
+    act.frame = CGRectMake(AC_SIDE, 362, innerW, 44);
     act.layer.cornerRadius = 12;
     act.titleLabel.font = [UIFont boldSystemFontOfSize:17];
     act.backgroundColor = [UIColor colorWithRed:0.18 green:0.68 blue:0.36 alpha:1.0];
@@ -470,6 +512,74 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     [self refreshUI];
 }
 
+#pragma mark 通道 / 日志
+
+/// 三条通道轮换：派发 → 队列 → 不可用 → 派发。
+/// 用户点一次就能试出这台设备上哪条真的能点。
+- (void)onSwitchChannel {
+    ACInjectChannel cur = ACInjectActiveChannel();
+    ACInjectChannel next;
+    switch (cur) {
+        case ACInjectChannelDispatch: next = ACInjectChannelEnqueue;  break;
+        case ACInjectChannelEnqueue:  next = ACInjectChannelNone;     break;
+        default:                      next = ACInjectChannelDispatch; break;
+    }
+    ACSetInjectChannel(next);
+    ACDLog(@"用户切换通道: %@ -> %@", ACInjectChannelName(cur), ACInjectChannelName(next));
+    [self refreshUI];
+}
+
+- (void)showLog {
+    if (self.logView) {
+        [self.logView removeFromSuperview];
+        self.logView = nil;
+        return;
+    }
+    if (self.panel.superview) [self.panel removeFromSuperview];
+
+    CGRect screen = self.win.bounds;
+    UIView *host = [[UIView alloc] initWithFrame:screen];
+    host.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.86];
+
+    CGFloat pad = 14;
+    CGFloat w = screen.size.width - pad * 2;
+
+    UILabel *t = [self makeLabel:@"运行日志（点任意处关闭）" size:13
+                           color:[UIColor whiteColor] bold:YES];
+    t.frame = CGRectMake(pad + 4, 48, w, 20);
+    [host addSubview:t];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:
+                        CGRectMake(pad, 74, w, screen.size.height - 74 - 60)];
+    tv.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    tv.textColor = [UIColor colorWithWhite:0.90 alpha:1.0];
+    tv.font = [UIFont fontWithName:@"Menlo" size:10.5] ?: [UIFont systemFontOfSize:10.5];
+    tv.editable = NO;
+    tv.layer.cornerRadius = 8;
+    tv.text = ACDLogTail(200);
+    [host addSubview:tv];
+
+    UILabel *path = [self makeLabel:[NSString stringWithFormat:@"文件：%@", ACDLogPath() ?: @"不可写"]
+                               size:10 color:[UIColor colorWithWhite:0.55 alpha:1] bold:NO];
+    path.frame = CGRectMake(pad + 4, screen.size.height - 46, w - 8, 32);
+    path.numberOfLines = 2;
+    [host addSubview:path];
+
+    UITapGestureRecognizer *tap =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(hideLog)];
+    [host addGestureRecognizer:tap];
+    // 文本要能滚动，别被手势吃掉
+    tap.cancelsTouchesInView = NO;
+
+    [self.win.rootViewController.view addSubview:host];
+    self.logView = host;
+}
+
+- (void)hideLog {
+    [self.logView removeFromSuperview];
+    self.logView = nil;
+}
+
 #pragma mark 刷新
 
 - (void)refreshUI {
@@ -513,6 +623,12 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     } else {
         self.regionLabel.text = [NSString stringWithFormat:@"点 (%.0f, %.0f)", e.point.x, e.point.y];
     }
+
+    [self.channelBtn setTitle:[NSString stringWithFormat:@"通道：%@", chName]
+                     forState:UIControlStateNormal];
+    self.channelBtn.backgroundColor = (ch == ACInjectChannelNone)
+        ? [UIColor colorWithRed:0.55 green:0.20 blue:0.18 alpha:1.0]
+        : [UIColor colorWithWhite:1.0 alpha:0.14];
 }
 
 #pragma mark 选点 / 框选

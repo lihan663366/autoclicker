@@ -9,9 +9,16 @@
 # 注意：App 进程没有 HID entitlement，注入通道会自动切换成
 # -[UIApplication _enqueueHIDEvent:]，代码里已处理，不需要你改任何东西。
 #
-# rootless 越狱（Dopamine / palera1n-rootless / XinaA15）保持下面这行开启。
-# 老式 rootful 越狱（unc0ver / checkra1n / palera1n-rootful）请把它注释掉。
+# rootless 越狱（Dopamine / palera1n-rootless / XinaA15）用默认值。
+# rootful 越狱（unc0ver / checkra1n / palera1n-rootful）加 ROOTFUL=1 编译：
+#     make package ROOTFUL=1
+# 装错这一项的表现是"包能装、但完全没效果"—— dylib 落在 /var/jb 下，
+# 老越狱只读根目录，Substrate 永远加载不到它。
+ifeq ($(ROOTFUL),1)
+THEOS_PACKAGE_SCHEME =
+else
 THEOS_PACKAGE_SCHEME = rootless
+endif
 
 BUNDLE_ID ?= com.apple.springboard
 
@@ -35,7 +42,7 @@ endif
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = AutoClicker
-AutoClicker_FILES = Tweak.xm ACCore.m ACUI.m
+AutoClicker_FILES = Tweak.xm ACCore.m ACUI.m ACDebug.m
 AutoClicker_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-deprecated-declarations
 AutoClicker_FRAMEWORKS = UIKit Foundation CoreGraphics
 AutoClicker_LDFLAGS = -undefined dynamic_lookup

@@ -26,6 +26,12 @@ ACInjectChannel ACRefreshInjectChannel(void);
 /// 当前生效的通道
 ACInjectChannel ACInjectActiveChannel(void);
 
+/// 手动指定通道（面板上的切换按钮用）。指定后自动探测不再覆盖它。
+void ACSetInjectChannel(ACInjectChannel ch);
+
+/// 开关：面板上的切换按钮用
+BOOL ACIsChannelOverridden(void);
+
 /// 通道名，用于界面上显示
 NSString *ACInjectChannelName(ACInjectChannel ch);
 

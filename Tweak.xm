@@ -10,7 +10,7 @@
 //
 //  两种宿主的差异：
 //
-//    SpringBoard —— 有 HID entitlement，走 IOHIDEventSystemClientDispatchEvent，
+//    SpringBoard —— 有 HID entitlement，优先走 IOHIDEventSystemClientDispatchEvent，
 //                   点击可以送到任意 App，但只能盖在 SpringBoard 层。
 //    普通 App   —— 没有 HID entitlement，走 -[UIApplication _enqueueHIDEvent:]，
 //                   事件只在本进程内生效，窗口也挂在 App 自己的 scene 上。
@@ -20,10 +20,15 @@
 
 #import "ACUI.h"
 #import "ACCore.h"
+#import "ACDebug.h"
 
 %ctor {
-    BOOL isSB = ACIsSpringBoard();
+    ACDLog(@"=========== AutoClicker 1.2.0 loaded ===========");
+    ACDLog(@"bundle=%@ executable=%@",
+           [NSBundle mainBundle].bundleIdentifier ?: @"?",
+           [NSBundle mainBundle].executablePath ?: @"?");
 
+    BOOL isSB = ACIsSpringBoard();
     ACRefreshInjectChannel();
 
     // SpringBoard 要等它把窗口体系铺完；App 进程 scene 就绪快得多
