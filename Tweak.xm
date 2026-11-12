@@ -1,17 +1,35 @@
 //
-//  Tweak.xm — 注入 SpringBoard，加载悬浮球
+//  Tweak.xm — 悬浮球入口
 //
-//  注入目标由 AutoClicker.plist 决定（默认 com.apple.springboard）。
-//  想只在某个 App 里生效，把 plist 的 Bundles 换成该 App 的 bundle id 即可，代码无需改动。
+//  注入目标由 AutoClicker.plist 的 Bundles 决定，而该文件由 Makefile 根据
+//  BUNDLE_ID 生成：
+//
+//      make package BUNDLE_ID=com.apple.springboard   # 全局生效（默认）
+//      make package BUNDLE_ID=com.tencent.xin         # 只注入微信
+//      make package BUNDLE_ID=com.a,com.b             # 多个 App
+//
+//  两种宿主的差异：
+//
+//    SpringBoard —— 有 HID entitlement，走 IOHIDEventSystemClientDispatchEvent，
+//                   点击可以送到任意 App，但只能盖在 SpringBoard 层。
+//    普通 App   —— 没有 HID entitlement，走 -[UIApplication _enqueueHIDEvent:]，
+//                   事件只在本进程内生效，窗口也挂在 App 自己的 scene 上。
+//
+//  所以"注入 App"不是换个 bundle id 就完事，注入通道也得跟着换 —— 下面运行时探测。
 //
 
 #import "ACUI.h"
+#import "ACCore.h"
 
 %ctor {
-    if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) return;
+    BOOL isSB = ACIsSpringBoard();
 
-    // 等 SpringBoard 的窗口体系就绪
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+    ACRefreshInjectChannel();
+
+    // SpringBoard 要等它把窗口体系铺完；App 进程 scene 就绪快得多
+    NSTimeInterval delay = isSB ? 3.0 : 0.35;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [[ACManager shared] setup];
     });

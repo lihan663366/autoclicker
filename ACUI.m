@@ -11,8 +11,17 @@
 #define AC_PANEL_H   384.0
 #define AC_SIDE      16.0
 
-static const CGFloat kACWindowLevel    = 10000200.0;   // 悬浮球层
-static const CGFloat kACSelectLevel    = 10000300.0;   // 框选遮罩层
+static const CGFloat kACWindowLevel    = 10000200.0;   // SpringBoard 下的悬浮球层
+static const CGFloat kACSelectLevel    = 10000300.0;   // SpringBoard 下的框选遮罩层
+
+/// 普通 App 里不需要（也不该）用 SpringBoard 那么夸张的层级，
+/// Alert 之上一点点就能盖住 App 自己的所有弹出层。
+static CGFloat ACIconLevel(void) {
+    return ACIsSpringBoard() ? kACWindowLevel : (UIWindowLevelAlert + 1000.0);
+}
+static CGFloat ACSelectLevel(void) {
+    return ACIsSpringBoard() ? kACSelectLevel : (UIWindowLevelAlert + 1100.0);
+}
 
 #pragma mark - 可穿透窗口
 
@@ -108,11 +117,21 @@ static ACWindow *ACMakeWindow(CGFloat level) {
     [self setupAttempt:0];
 }
 
-/// SpringBoard 启动早期 connectedScenes 可能还是空的，拿不到 scene 就等一会儿再来
+/// 宿主启动早期 connectedScenes 可能还是空的，拿不到 scene 就等一会儿再来。
+/// App 进程从 didBecomeActive 到 scene 就绪通常不到 1 秒，这里给足 20 秒余量。
 - (void)setupAttempt:(NSInteger)attempt {
     if (self.didSetup) return;
 
-    if (!ACActiveScene() && attempt < 12) {
+    BOOL ready = (ACActiveScene() != nil);
+
+    // App 可能被推送/后台任务唤醒加载我们，那种时候不能建窗
+    if (ready && !ACIsSpringBoard()) {
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+            ready = NO;
+        }
+    }
+
+    if (!ready && attempt < 40) {
         __weak typeof(self) weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -123,7 +142,8 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
     self.didSetup = YES;
 
-    self.win = ACMakeWindow(kACWindowLevel);
+    ACRefreshInjectChannel();
+    self.win = ACMakeWindow(ACIconLevel());
 
     [self buildIcon];
     [self buildPanel];
@@ -133,6 +153,17 @@ static ACWindow *ACMakeWindow(CGFloat level) {
         __strong typeof(self) s = weakSelf;
         [s refreshUI];
     };
+
+    // 注入到本进程时，悬浮窗自己也在事件路径上 —— 每次点击前让开一瞬
+    [ACEngine shared].willTap = ^{
+        __strong typeof(self) s = weakSelf;
+        s.win.userInteractionEnabled = NO;
+    };
+    [ACEngine shared].didTap = ^{
+        __strong typeof(self) s = weakSelf;
+        s.win.userInteractionEnabled = YES;
+    };
+
     [self refreshUI];
 }
 
@@ -412,8 +443,23 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
 - (void)onAction {
     ACEngine *e = [ACEngine shared];
-    if (e.running) [e stop];
-    else            [e start];
+
+    if (e.running) {
+        [e stop];
+        [self refreshUI];
+        return;
+    }
+
+    if (ACInjectActiveChannel() == ACInjectChannelNone) {
+        self.statusLabel.text = @"注入通道不可用，无法点击";
+        self.statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.42 blue:0.34 alpha:1];
+        return;
+    }
+
+    [e start];
+
+    // 面板本身会挡住落点，开跑就收起
+    [self closePanel];
     [self refreshUI];
 }
 
@@ -429,14 +475,26 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 - (void)refreshUI {
     ACEngine *e = [ACEngine shared];
 
-    if (e.running) {
-        self.statusLabel.text = [NSString stringWithFormat:@"运行中 · 已点击 %ld 次", (long)e.tapCount];
+    ACInjectChannel ch = ACInjectActiveChannel();
+    NSString *chName = ACInjectChannelName(ch);
+
+    if (ch == ACInjectChannelNone) {
+        // 通道不通时点多少次都不会有反应，必须让用户一眼看到
+        self.statusLabel.text = @"注入通道不可用 · 点击无效";
+        self.statusLabel.textColor = [UIColor colorWithRed:0.95 green:0.42 blue:0.34 alpha:1];
+    } else if (e.running) {
+        self.statusLabel.text = [NSString stringWithFormat:@"运行中 · 已点击 %ld 次 · %@",
+                                 (long)e.tapCount, chName];
         self.statusLabel.textColor = [UIColor colorWithRed:0.34 green:0.86 blue:0.46 alpha:1];
+    } else {
+        self.statusLabel.text = [NSString stringWithFormat:@"已停止 · 注入通道：%@", chName];
+        self.statusLabel.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
+    }
+
+    if (e.running) {
         [self.actionBtn setTitle:@"停 止" forState:UIControlStateNormal];
         self.actionBtn.backgroundColor = [UIColor colorWithRed:0.80 green:0.24 blue:0.24 alpha:1.0];
     } else {
-        self.statusLabel.text = @"已停止";
-        self.statusLabel.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
         [self.actionBtn setTitle:@"开 始" forState:UIControlStateNormal];
         self.actionBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.68 blue:0.36 alpha:1.0];
     }
@@ -472,7 +530,7 @@ static ACWindow *ACMakeWindow(CGFloat level) {
 
     if (self.panel.superview) [self.panel removeFromSuperview];
 
-    ACWindow *w = ACMakeWindow(kACSelectLevel);
+    ACWindow *w = ACMakeWindow(ACSelectLevel());
     w.passesThroughTouches = NO;          // 遮罩必须吃触摸，否则手势收不到
     w.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.28];
     w.rootViewController.view.backgroundColor = [UIColor clearColor];

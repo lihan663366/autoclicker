@@ -4,12 +4,18 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: '目标 App bundle id（多个用英文逗号分隔；留空 = SpringBoard 全局版）'
+        required: false
+        default: 'com.apple.springboard'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       THEOS: ${{ github.workspace }}/theos
+      BUNDLE_ID: ${{ github.event.inputs.bundle_id || 'com.apple.springboard' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -45,15 +51,23 @@ jobs:
         run: |
           export PATH="$THEOS/bin:$PATH"
           make clean || true
-          make package FINALPACKAGE=1 DEBUG=0
+          make package FINALPACKAGE=1 DEBUG=0 BUNDLE_ID="$BUNDLE_ID"
+          echo "--- 实际注入目标 ---"
+          cat AutoClicker.plist
 
       - name: Show artifacts
         if: always()
         run: ls -lh packages/ || true
 
+      - name: Resolve artifact name
+        id: name
+        run: |
+          safe=$(echo "$BUNDLE_ID" | tr '.,' '__')
+          echo "value=AutoClicker-deb-$safe" >> "$GITHUB_OUTPUT"
+
       - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: AutoClicker-deb
+          name: ${{ steps.name.outputs.value }}
           path: packages/*.deb
           if-no-files-found: error

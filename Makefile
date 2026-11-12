@@ -1,12 +1,36 @@
 # AutoClicker — 越狱自动连点器
 #
+# 注入目标由 BUNDLE_ID 决定，默认 SpringBoard（在任何 App 上都能用）：
+#
+#     make package                                   # SpringBoard，全局生效
+#     make package BUNDLE_ID=com.tencent.xin         # 只注入微信
+#     make package BUNDLE_ID=com.a,com.b             # 同时注入多个 App
+#
+# 注意：App 进程没有 HID entitlement，注入通道会自动切换成
+# -[UIApplication _enqueueHIDEvent:]，代码里已处理，不需要你改任何东西。
+#
 # rootless 越狱（Dopamine / palera1n-rootless / XinaA15）保持下面这行开启。
 # 老式 rootful 越狱（unc0ver / checkra1n / palera1n-rootful）请把它注释掉。
 THEOS_PACKAGE_SCHEME = rootless
 
+BUNDLE_ID ?= com.apple.springboard
+
+# bundle id 只允许字母数字和 . _ , - ，否则会破坏下面生成的 plist
+ifeq ($(shell echo '$(BUNDLE_ID)' | grep -qE '^[A-Za-z0-9._,-]+$$' && echo ok),)
+$(error BUNDLE_ID 只能包含字母、数字和 . _ , - ：'$(BUNDLE_ID)')
+endif
+
+# Theos 只认静态的 Filter plist，这里按 BUNDLE_ID 生成一份（逗号分隔转成数组）
+BUNDLE_LIST := $(shell echo '$(BUNDLE_ID)' | sed 's/[[:space:]]//g; s/,/","/g')
+$(shell printf '{ Filter = { Bundles = ( "%s" ); }; }\n' '$(BUNDLE_LIST)' > AutoClicker.plist)
+
 TARGET := iphone:clang:latest:15.0
 ARCHS = arm64 arm64e
+
+# 只有在 SpringBoard 版本里，安装后重启 SpringBoard 才有意义
+ifneq ($(findstring com.apple.springboard,$(BUNDLE_ID)),)
 INSTALL_TARGET_PROCESSES = SpringBoard
+endif
 
 include $(THEOS)/makefiles/common.mk
 

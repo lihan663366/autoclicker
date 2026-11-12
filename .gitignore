@@ -4,6 +4,9 @@ packages/
 obj/
 *.deb
 
+# 由 Makefile 按 BUNDLE_ID 生成
+AutoClicker.plist
+
 # 编译中间文件
 *.dylib
 *.o
